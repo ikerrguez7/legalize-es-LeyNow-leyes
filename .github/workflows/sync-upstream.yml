@@ -1,0 +1,80 @@
+name: Sync fork con legalize-dev/legalize-es
+
+# Issue #114 (ikerrguez7/Codexone) — este fork existía pero no se
+# sincronizaba solo (último push manual: 2026-08-07). sync-leyes.mjs en
+# Codexone ahora apunta aquí en vez de a upstream directo — sin este cron,
+# apuntar al fork no aporta nada, se quedaría congelado en la fecha de
+# creación.
+#
+# gh repo sync hace fetch+merge/push de upstream en un solo paso, con
+# código de salida distinto de 0 si falla — más simple que encadenar
+# git remote add/fetch/merge/push a mano.
+#
+# Diario, no semanal: legalize-dev/legalize-es está activo, un cron semanal
+# aquí dejaría hasta 6 días de desfase antes del sync semanal de Codexone
+# (lunes 06:00 UTC) — justo el tipo de staleness silenciosa que se quiere
+# evitar.
+
+on:
+  schedule:
+    - cron: '0 5 * * *' # diario 05:00 UTC — 1h antes del sync-leyes.yml de Codexone
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Sync con upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Señal distinta de un fallo de sync normal: si upstream ya no existe
+      # o se hizo privado, no tiene sentido reintentar el sync — hay que
+      # decidir qué hacer sin fuente, no "reintentar más tarde".
+      - name: Comprobar que upstream sigue siendo accesible
+        id: check-upstream
+        run: |
+          if ! git ls-remote https://github.com/legalize-dev/legalize-es.git HEAD > /dev/null 2>&1; then
+            echo "upstream_gone=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Alertar si upstream ha desaparecido
+        if: steps.check-upstream.outputs.upstream_gone == 'true'
+        uses: ikerrguez7/Codexone/.github/actions/alert-on-failure@main
+        with:
+          repo: ikerrguez7/Codexone
+          github-token: ${{ secrets.GH_ALERT_TOKEN }}
+          label: alert:fork-upstream-gone
+          title: "🔴 legalize-dev/legalize-es ya no es accesible"
+          body: |
+            `git ls-remote` contra legalize-dev/legalize-es falló — el repo puede haberse borrado o hecho privado.
+
+            Distinto de un fallo normal de sync: no hay fuente upstream que sincronizar hasta que esto se resuelva. Este fork sigue sirviendo su última copia conocida, pero deja de recibir actualizaciones.
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+      - name: Detener si upstream ha desaparecido
+        if: steps.check-upstream.outputs.upstream_gone == 'true'
+        run: exit 1
+
+      - name: gh repo sync con legalize-dev/legalize-es
+        run: gh repo sync ${{ github.repository }} --source legalize-dev/legalize-es
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Alertar si el sync del fork falló
+        # No duplica la alerta del step de arriba — esta solo dispara si
+        # upstream SÍ es accesible pero gh repo sync falló por otro motivo
+        # (conflicto, rate limit, etc.)
+        if: failure() && steps.check-upstream.outputs.upstream_gone != 'true'
+        uses: ikerrguez7/Codexone/.github/actions/alert-on-failure@main
+        with:
+          repo: ikerrguez7/Codexone
+          github-token: ${{ secrets.GH_ALERT_TOKEN }}
+          label: alert:fork-sync
+          title: "🔴 sync-upstream.yml (fork) falló"
+          body: |
+            El sync diario de este fork con legalize-dev/legalize-es falló (upstream sí es accesible — ver el step de comprobación para ese caso aparte).
+
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
